@@ -1,0 +1,6 @@
+numpy
+pyTorch
+scipy
+matplotlib
+pandas
+nltk

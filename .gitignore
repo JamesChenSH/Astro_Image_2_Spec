@@ -1,0 +1,5 @@
+toy_*
+__pycache__
+.DS_Store
+*.csv
+*.npy
