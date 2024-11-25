@@ -1,0 +1,21 @@
+{
+    "device": "cuda", 
+    "epochs": 100,
+    "batch_size": 32,
+    "lr": 0.0001,
+
+
+    "audio_depth": 2205,
+    "img_depth": 259,    
+    "embedding_dim": 512,           
+    "encoder_head_num": 2,               
+    "decoder_head_num": 2,
+    "encoder_ff_dim": 1024,             
+    "decoder_ff_dim": 1024,            
+    "encoder_dropout_rate": 0.1, 
+    "decoder_dropout_rate": 0.1,
+    "encoder_attn_dropout": 0.0,
+    "decoder_attn_dropout": 0.0, 
+    "num_enc_layers": 2,         
+    "num_dec_layers": 2        
+}
