@@ -4,9 +4,10 @@ from torch.utils.data import Dataset
 
 
 # IMG_PATH = './datasets/image_run2d_dr16q.csv'
-SPEC_PATH = './datasets/spec_run2d_dr16q.csv'
+# SPEC_PATH = './datasets/spec_run2d_dr16q.csv'
 
 IMG_PATH = './datasets/imgs_1000.pt'
+SPEC_PATH = './datasets/specs_1000.pt'
 
 class AstroImageSpecDataset(Dataset):
     def __init__(self, img_path=IMG_PATH, spec_path=SPEC_PATH, dtype=torch.float32):

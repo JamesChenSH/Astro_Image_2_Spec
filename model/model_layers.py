@@ -337,7 +337,7 @@ class AstroImage2SpecModel(nn.Module):
         self.encoder_head_num = encoder_head_num
         self.decoder_head_num = decoder_head_num
         
-        self.img_pe = positional_encoding_sinusoidal(embedding_dim, img_size ** 2).to(self.device)
+        self.img_pe = positional_encoding_sinusoidal(embedding_dim, img_size).to(self.device)
         self.spec_pe = positional_encoding_sinusoidal(embedding_dim, spec_len).to(self.device)
         
         self.img_embedding = TransformerLinearEmbedding(img_depth, embedding_dim)              # [batch_size, img_len, embedding_dim]
@@ -430,9 +430,11 @@ class AstroImage2SpecModel(nn.Module):
         return: Image tokens [batch_size, spec_len]
         '''
         # Create padding mask for src
-        src_mask = self.generate_padding_mask(input_tokens)
+        # src_mask = self.generate_padding_mask(input_tokens)
+        src_mask = None
         # Create causal mask for tgt
-        tgt_mask = self.generate_causal_mask(output_tokens)
+        # tgt_mask = self.generate_causal_mask(output_tokens)
+        tgt_mask = None
         
         # embed the image to vectors
         encoder_x = self.get_img_embedding(input_tokens.unsqueeze(-1))
