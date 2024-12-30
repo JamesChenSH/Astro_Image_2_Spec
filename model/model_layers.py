@@ -449,7 +449,8 @@ class AstroImage2SpecModel(nn.Module):
     
     ###############################
     #     Generation Functions    #
-    ###############################
+    ###############################   
+    
     def generate_spectrum(self, input_tokens:torch.Tensor, out_len:int=3600, process_bar:bool=False):
         """
         Generate spectrum from image input. Use Greedy Decode ATM.
@@ -460,10 +461,10 @@ class AstroImage2SpecModel(nn.Module):
         Return: Spectrum tokens [batch_size, spec_len]
         """
         
-        generation_seq = torch.zeros(input_tokens.size(0), 1, dtype=int).fill_(0).to(self.device)
+        generation_seq = torch.zeros(input_tokens.size(0), 1, dtype=torch.float32).fill_(0).to(self.device).unsqueeze(-1)
         
         src_mask = self.generate_padding_mask(input_tokens).to(self.device)
-        src_x = self.get_img_embedding(input_tokens).to(self.device)
+        src_x = self.get_img_embedding(input_tokens.unsqueeze(-1)).to(self.device)
         encoded_src = self.encoder(src_x, src_mask)
         
         if process_bar:
@@ -473,15 +474,11 @@ class AstroImage2SpecModel(nn.Module):
 
         for _ in iterative:
             # Generate Masks for Target Sequence
-            tgt_causal_mask = self.generate_causal_mask(generation_seq).unsqueeze(0).repeat(generation_seq.size(0), 1, 1)
-            tgt_padding_mask = self.generate_padding_mask(generation_seq).unsqueeze(1).repeat(1, generation_seq.size(1), 1)
-            tgt_mask = tgt_causal_mask | tgt_padding_mask
+            tgt_mask = self.generate_causal_mask(generation_seq).unsqueeze(0).repeat(generation_seq.size(0), 1, 1)
             
             # print(tgt_mask.shape)
             tgt_mask = tgt_mask.unsqueeze(1).repeat(1, self.decoder_head_num, 1, 1)
-            # print(tgt_mask.shape)
             tgt_mask = tgt_mask.view(-1, tgt_mask.size(2), tgt_mask.size(3))
-            # print(tgt_mask.shape)
             tgt_x = self.get_spec_embedding(generation_seq)
             
             
@@ -490,7 +487,6 @@ class AstroImage2SpecModel(nn.Module):
             generated_token = decoded_seq[:, -1].unsqueeze(1)
             generation_seq = torch.cat([generation_seq, generated_token], dim=1)
         
-        # TODO: Use softmax to get pixel value of entire image
         spec_out = generation_seq[:, 1:]
 
         return spec_out
