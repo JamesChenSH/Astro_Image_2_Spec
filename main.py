@@ -1,6 +1,8 @@
-import torch, os
+import torch, os, json, transformers
 import torch.utils.data
 import numpy as np
+from argparse import ArgumentParser
+from datetime import datetime
 
 from torch.utils.data import Subset
 
@@ -9,7 +11,10 @@ from tqdm import tqdm
 from model.model_layers import AstroImage2SpecModel
 from utils.dataset_builder import AstroImageSpecDataset
 
-torch.manual_seed(0)
+torch.manual_seed(42)
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+
 class  AstroImage2Spec():
     '''
     The Wrapper class for Audio2Image model. We can define the structure of model here
@@ -21,11 +26,11 @@ class  AstroImage2Spec():
         img_depth:int = 1,                      # [src_len]
         img_len:int = 2880, 
         spec_depth:int = 1,                     # [tgt_len]
-        spec_len:int = 3600,
+        spec_len:int = 3601,                    # 3600 from spectrum, 1 for the <sos> token
         device:str = 'cuda',                    # 'cuda' or 'cpu' or 'mps'
         embedding_dim:int = 256,                # 1024 for optimal
-        encoder_head_num:int = 6,               
-        decoder_head_num:int = 6,
+        encoder_head_num:int = 8,               
+        decoder_head_num:int = 8,
         encoder_ff_dim:int = 4*256,             # 4*1024 for optimal
         decoder_ff_dim:int = 4*256,             # 4*1024 for optimal
         encoder_dropout_rate:float = 0.1, 
@@ -37,7 +42,8 @@ class  AstroImage2Spec():
 
         epochs:int = 10,
         patience:int = 5,
-        lr: float = 1e-3
+        lr: float = 1e-3,
+        warmup: int = 11250
     ):
         """
         This is the main model for the Audio 2 Image project. We only need to build this once
@@ -79,6 +85,8 @@ class  AstroImage2Spec():
         num_dec_layers: int
             Number of decoder layers
         """
+        
+        # Model Parameters
         self.img_depth = img_depth
         self.img_len = img_len
         self.spec_dpeth = spec_depth
@@ -103,7 +111,6 @@ class  AstroImage2Spec():
             print("CUDA Device not available, using CPU")
             self.device = 'cpu'
         
-    
         self.model = AstroImage2SpecModel(
             self.img_depth,
             self.img_len,
@@ -131,11 +138,16 @@ class  AstroImage2Spec():
         # HyperParameters
         self.label_smoothing = 0.1
         self.learning_rate = lr
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate, betas=(0.9, 0.98), eps=1e-9)
-        self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lambda step: self.lr_scheduler(self.embedding_dim, step, warmup=300))
-        self.criterion = torch.nn.MSELoss()     
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate, betas=(0.9, 0.95), eps=1e-9, weight_decay=0.1)
+        # self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lambda step: self.lr_scheduler(self.embedding_dim, step, warmup=11250))
+        self.scheduler = transformers.get_scheduler("cosine", self.optimizer, num_warmup_steps=warmup, num_training_steps=warmup*epochs)
+        self.criterion = torch.nn.MSELoss(reduction='mean')     
         self.epochs = epochs
         self.patience = patience
+        
+        # Init Metadata for Saving
+        self.training_start_time = None
+
         
     def lr_scheduler(self, dim_model: int, step:int, warmup:int):
         if step == 0:
@@ -147,8 +159,6 @@ class  AstroImage2Spec():
         self,
         training_dataloader:torch.utils.data.DataLoader,
         val_dataloader:torch.utils.data.DataLoader,
-        batch_size: int = 8,
-        patience: int = 5
     ) -> None:
         '''
         Parameters:
@@ -157,7 +167,16 @@ class  AstroImage2Spec():
         output_imgs: np.ndarray
             Output image data, 3D array of shape (num_samples, img_size, img_val)
         '''
+        
+        # Start time
+        self.training_start_time = datetime.now()
+        
+        self.model.to(self.device)
         self.criterion.to(self.device)
+        
+        cached_param = None
+        lowest_val_loss = float('inf')
+        wait_count = 0
         
         for epoch in range(self.epochs):
             self.model.train()
@@ -165,9 +184,13 @@ class  AstroImage2Spec():
             total_loss = 0
             print(f"== Epoch: {epoch}, Device: {self.device} ==")
 
-            for img, spectrum in tqdm(training_dataloader):
+            pbar = tqdm(training_dataloader)
+
+            for img, spectrum in pbar:
+
                 img = img.to(self.device)
                 spectrum = spectrum.to(self.device)
+                
                 # Input a shifted out_image to model as well as input audio
                 output = self.model(img, spectrum[:, :-1]).squeeze(-1)
                 # Outputs a predicted image
@@ -177,20 +200,24 @@ class  AstroImage2Spec():
                 self.optimizer.step()
                 self.scheduler.step()
                 total_loss += loss.item()
+
+                pbar.set_description(f"Cur Loss: {round(loss.item(), 4)}")
             
             print(f"== Training Loss: {total_loss / len(train_dataloader)}, Device: {self.device}")
             
 
             self.model.eval()
+            val_loss = 0
             with torch.no_grad():
                 for i, (img, spectrum) in enumerate(val_dataloader):
                     # Compare the predicted image with the actual image with some function
                     
-                    audio = audio.to(self.device)
                     img = img.to(self.device)
+                    spectrum = spectrum.to(self.device)
                     
                     gen_spec = self.model(img, spectrum[:, :-1])
-                    loss = self.criterion(gen_spec.reshape(-1, gen_spec.shape[-1]), img[:, 1:].contiguous().view(-1))
+                    # Use average MSE over the epoch
+                    loss = self.criterion(gen_spec.reshape(-1, gen_spec.shape[-1]).squeeze(), spectrum[:, 1:].contiguous().view(-1))
                     val_loss += loss.item()
                 
                 val_loss /= len(val_dataloader)
@@ -202,59 +229,122 @@ class  AstroImage2Spec():
                 else:
                     wait_count += 1
                     print(f"Waiting: {wait_count}")
-                    if wait_count == patience:
+                    if wait_count == self.patience:
                         print("Checkpoint Saved")
-                        torch.save(cached_param, f"{model_dir}/checkpoint_epoch_{epoch}_loss{round(val_loss, 5)}.pt")
+                        self.save(epoch, lowest_val_loss, base_path='./checkpoints', ckpt=cached_param)
+            
+            print(f"== Validation Loss: {val_loss}, Device: {self.device}")
+        self.save(epoch, lowest_val_loss, base_path='./checkpoints', ckpt=cached_param)
         
         print(f"Training Complete")
+        return total_loss / len(training_dataloader), val_loss
             
 
-    def test(
-        self,
-        testing_dataloader:torch.utils.data.DataLoader
-    ):
-        self.model.to(self.device)
-        self.criterion.to(self.device)
+    # def test(
+    #     self,
+    #     testing_dataloader:torch.utils.data.DataLoader
+    # ):
+    #     self.model.to(self.device)
+    #     self.criterion.to(self.device)
         
-        self.model.eval()
+    #     self.model.eval()
         
-        test_loss = 0
+    #     test_loss = 0
         
-        with torch.no_grad():
-            for audio, img in tqdm(testing_dataloader):
-                audio = audio.to(self.device)
-                img = img.to(self.device)
-                img = img.int()
+    #     with torch.no_grad():
+    #         for img, spectrum in tqdm(testing_dataloader):
+                
+    #             spectrum = spectrum.to(self.device)
+    #             img = img.to(self.device)
             
-                gen_img = self.model.generate_image(audio)
+    #             gen_img = self.model.generate_spectrum(img)
 
-                gen_img_np = gen_img.detach().cpu().numpy().astype(np.float32)
-                img_np = img.detach().cpu().numpy().astype(np.float32) 
+    #             gen_img_np = gen_img.detach().cpu().numpy().astype(np.float32)
+    #             img_np = img.detach().cpu().numpy().astype(np.float32) 
 
-                loss = self.validation_criterion(gen_img_np, img_np, data_range=259.0)
-                test_loss += loss/test_dataloader.batch_size
+    #             loss = self.validation_criterion(gen_img_np, img_np, data_range=259.0)
+    #             test_loss += loss/test_dataloader.batch_size
         
-        print(f"Test Loss: {test_loss}, Device: {self.device}")             
+    #     print(f"Test Loss: {test_loss}, Device: {self.device}")             
+    
+    
+    def save(self, cur_epoch: int=0, cur_loss: float=0.0, base_path: str='./checkpoints', ckpt = None) -> None:
+        '''
+        Save the model to a file
+        '''
+        
+        if not os.path.isdir(base_path):
+            os.mkdir(base_path)
+        
+        # Compose model directory name
+        model_dir = f"{base_path}/train_{self.training_start_time.strftime('%Y-%m-%d_%H-%M-%S')}"
+        
+        # If never saved before, save model parameters in json
+        if not os.path.isdir(model_dir):
+            os.mkdir(model_dir)
+            # Compose model parameter json
+            model_param = {
+                'embedding_dim': self.embedding_dim,
+                'encoder_head_num': self.encoder_head_num,
+                'decoder_head_num': self.decoder_head_num,
+                'encoder_ff_dim': self.encoder_ff_dim,
+                'decoder_ff_dim': self.decoder_ff_dim,
+                'encoder_dropout_rate': self.encoder_dropout_rate,
+                'decoder_dropout_rate': self.decoder_dropout_rate,
+                'encoder_attn_dropout': self.encoder_attn_dropout,
+                'decoder_attn_dropout': self.decoder_attn_dropout,
+                'num_enc_layers': self.num_enc_layers,
+                'num_dec_layers': self.num_dec_layers,
+                'lr': self.learning_rate,
+                'epochs': self.epochs,
+                'patience': self.patience
+            }
+            # Save model parameters
+            with open(f"{model_dir}/model_param.json", 'w') as f:
+                json.dump(model_param, f)
+        
+        # Save model
+        
+        # Compose model name
+        if ckpt is not None:
+            model_name = f"{model_dir}/ckpt_ep_{cur_epoch}_loss_{str(round(cur_loss, 4)).replace('.', '_')}.pt" 
+            torch.save(self.model.state_dict(), model_name)
+        else:
+            model_name = f"{model_dir}/model_ep_{cur_epoch}_loss_{str(round(cur_loss, 4)).replace('.', '_')}.pt"
+            torch.save(self.model.state_dict(), model_name)
+            
 
 
 if __name__ == "__main__":
 
+    parser = ArgumentParser()
+    
+    parser.add_argument("--use_model", type=str, default=None, help="Path to the model's folder")
+    parser.add_argument("--use_base_dataset", type=str, default='./datasets/AstroImg2Spec_ds_1000.pt', help="Path to the base dataset") 
+    parser.add_argument("--use_train_dataset", type=str, default=None, help="Customize the training dataset")
+    parser.add_argument("--use_val_dataset", type=str, default=None, help="Customize the validation dataset")
+    
+
     config = {
-        'batch size': 16,
-        'train ratio': 0.8,
+        'batch size': 4,
+        'train ratio': 0.9,
         'validation ratio': 0.1,
-        'test ratio': 0.1,
         'device': 'cuda',
 
-        'embedding_dim': 256,
-        'encoder_head_num': 6,
-        'decoder_head_num': 6,
+        'embedding_dim': 512,
+        'encoder_head_num': 8,
+        'decoder_head_num': 8,
 
-        'encoder_ff_dim': 4*256,
-        'decoder_ff_dim': 4*256,
+        'encoder_ff_dim': 4*512,
+        'decoder_ff_dim': 4*512,
+        
+        'num_enc_layers': 6,
+        'num_dec_layers': 6,
 
-        'lr': 1e-3,
-        'epochs': 100,
+        'lr': 1e-5,
+        'epochs': 50,
+        'patience': 5,
+        'warmup': 11250
     }
 
     
@@ -266,10 +356,16 @@ if __name__ == "__main__":
         decoder_ff_dim=config['decoder_ff_dim'],
         lr=config['lr'],
         epochs=config['epochs'],
-        device=config['device'])
+        device=config['device'],
+        num_enc_layers=config['num_enc_layers'],
+        num_dec_layers=config['num_dec_layers'],
+        patience=config['patience'],
+        warmup=config['warmup']
+    )
 
     # Load the dataset
-    ds_path = "datasets/AstroImg2Spec_ds_1000.pt"
+    N = 10000
+    ds_path = f"datasets/AstroImg2Spec_ds_{N}.pt"
     ds = torch.load(ds_path, weights_only=False)
 
     # Split Train, Val, Test
@@ -278,29 +374,22 @@ if __name__ == "__main__":
     val_size = int(config['validation ratio']*len(ds))
     test_size = len(ds) - train_size - val_size
 
-    train, val, test = torch.utils.data.random_split(ds, [train_size, val_size, test_size])
-
-    torch.save(train, "datasets/train_ds.pt")
-    torch.save(val, "datasets/val_ds.pt")
-    torch.save(test, "datasets/test_ds.pt")
+    train, val = torch.utils.data.random_split(ds, [train_size, val_size])
+    torch.save(train, f"datasets/train_ds_{N}.pt")
+    torch.save(val, f"datasets/val_ds_{N}.pt")
     train_dataloader = torch.utils.data.DataLoader(train, batch_size=config['batch size'], shuffle=True)
-    val_dataloader = torch.utils.data.DataLoader(val, batch_size=config['batch size'], shuffle=True)    
-    test_dataloader = torch.utils.data.DataLoader(test, batch_size=config['batch size'], shuffle=True)
+    val_dataloader = torch.utils.data.DataLoader(val, batch_size=config['batch size'], shuffle=True)   
     
     
     # Chack size of model
     total_params = sum(p.numel() for p in a2i_core.model.parameters())
     print(f"Number of parameters: {total_params}")
     
-    # Save the model
-    model_dir = f"model/model_dim_{a2i_core.embedding_dim}_layer_enc_{a2i_core.num_enc_layers}_dec_{a2i_core.num_dec_layers}"
-    if not os.path.isdir(model_dir):
-        os.mkdir(model_dir)
     # Train
-    a2i_core.train(train_dataloader, val_dataloader, model_dir)
-    # Save the model
-    model_path = f"{model_dir}/model_bs_{config['batch size']}_lr_{config['lr']}.pt"
-    torch.save(a2i_core.model.state_dict(), model_path)
+    train_loss, val_loss = a2i_core.train(train_dataloader, val_dataloader)
     
-    # Test
-    a2i_core.test(test_dataloader)
+    # Save the model
+    a2i_core.save(cur_epoch=config['epochs'], cur_loss=val_loss, ckpt=None)
+    
+    # # Test
+    # a2i_core.test(test_dataloader)

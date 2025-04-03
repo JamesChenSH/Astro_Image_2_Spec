@@ -1,6 +1,7 @@
 numpy
-pyTorch
+torch
 scipy
 matplotlib
 pandas
 nltk
+tqdm
