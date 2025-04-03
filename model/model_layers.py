@@ -340,6 +340,7 @@ class AstroImage2SpecModel(nn.Module):
         self.img_pe = positional_encoding_sinusoidal(embedding_dim, img_size).to(self.device)
         self.spec_pe = positional_encoding_sinusoidal(embedding_dim, spec_len).to(self.device)
         
+        # Let the model learn how to embed
         self.img_embedding = TransformerLinearEmbedding(img_depth, embedding_dim)              # [batch_size, img_len, embedding_dim]
         self.spec_embedding = TransformerLinearEmbedding(spec_depth, embedding_dim)            # [batch_size, spec_len, embedding_dim]
         
@@ -472,20 +473,20 @@ class AstroImage2SpecModel(nn.Module):
             iterative = range(out_len)
 
         for _ in iterative:
-            # Generate Masks for Target Sequence
-            tgt_causal_mask = self.generate_causal_mask(generation_seq).unsqueeze(0).repeat(generation_seq.size(0), 1, 1)
-            tgt_padding_mask = self.generate_padding_mask(generation_seq).unsqueeze(1).repeat(1, generation_seq.size(1), 1)
-            tgt_mask = tgt_causal_mask | tgt_padding_mask
+            # Generate Masks for Target Sequence [EDIT: Mask is not useful for Greedy Decode]
+            # tgt_causal_mask = self.generate_causal_mask(generation_seq).unsqueeze(0).repeat(generation_seq.size(0), 1, 1)
+            # tgt_padding_mask = self.generate_padding_mask(generation_seq).unsqueeze(1).repeat(1, generation_seq.size(1), 1)
+            # tgt_mask = tgt_causal_mask | tgt_padding_mask
             
             # print(tgt_mask.shape)
-            tgt_mask = tgt_mask.unsqueeze(1).repeat(1, self.decoder_head_num, 1, 1)
+            # tgt_mask = tgt_mask.unsqueeze(1).repeat(1, self.decoder_head_num, 1, 1)
             # print(tgt_mask.shape)
-            tgt_mask = tgt_mask.view(-1, tgt_mask.size(2), tgt_mask.size(3))
+            # tgt_mask = tgt_mask.view(-1, tgt_mask.size(2), tgt_mask.size(3))
             # print(tgt_mask.shape)
             tgt_x = self.get_spec_embedding(generation_seq)
             
             
-            decoded_seq = self.decoder(tgt_x, tgt_mask, encoded_src, src_mask)
+            decoded_seq = self.decoder(tgt_x, None, encoded_src, src_mask)
             
             generated_token = decoded_seq[:, -1].unsqueeze(1)
             generation_seq = torch.cat([generation_seq, generated_token], dim=1)
